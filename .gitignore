@@ -151,5 +151,6 @@ crashlytics-build.properties
 fabric.properties
 
 data/
+logs/
 *summary.txt
 *.csv
