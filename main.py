@@ -1,76 +1,85 @@
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-import tensorflow as tf
-from tensorflow.keras.callbacks import CSVLogger
-from datasets import load_dataset
-from transformers import BertTokenizer
-import models
-from contextlib import redirect_stdout
 import argparse
 import csv
 import logging
-import datetime
 import pathlib
+from datetime import datetime
+from contextlib import redirect_stdout
+import tensorflow as tf
+from models import ClassifierBuilder, CheckpointCallback
+from utils import get_task_data
 
 
-def split_dataset(dataset: tf.data.Dataset, train_data_fraction: float):
+def run_model(model: tf.keras.Model,
+              args,
+              train_ds: tf.data.Dataset,
+              test_ds: tf.data.Dataset,
+              val_ds: tf.data.Dataset = None):
     """
-    Splits a dataset of type tf.data.Dataset into a training and testing dataset using given ratio.
-    Fractions are rounded up to two decimal places.
-    :param dataset: the input dataset to split.
-    :param train_data_fraction: the fraction to use as training data as a float between 0 and 1.
-    :return: a tuple of two tf.data.Datasets as (train, test)
+    Fit and evaluate model on train/validate/test datasets.
+    :param model: keras.Model instance to run.
+    :param args: program arguments
+    :param train_ds: tf.data.Dataset containing training examples
+    :param test_ds: tf.data.Dataset containing test examples
+    :param val_ds: tf.data.Dataset containing validation examples
+    :return: a keras History object
     """
 
-    train_data_percent = round(train_data_fraction * 100)
-    if not (0 <= train_data_percent <= 100):
-        raise ValueError("fraction must be in the range [0,1]")
+    now = datetime.now().strftime('%y%m%d-%H%M%S')
+    log_dir = pathlib.Path.cwd().joinpath(args.log_dir, f"{now}{f'-{args.tag}' if args.tag else ''}")
+    log_dir.mkdir()
+    chk_dir = log_dir.joinpath('checkpoints')
+    chk_dir.mkdir()
 
-    dataset = dataset.enumerate()
-    test_dataset = dataset.filter(lambda f, data: f % 100 > train_data_percent)
-    train_dataset = dataset.filter(lambda f, data: f % 100 <= train_data_percent)
+    with open(log_dir.joinpath('cls_summary.txt'), 'w') as f:
+        with redirect_stdout(f):
+            model.summary()
+    tf.keras.utils.plot_model(model,
+                              to_file=log_dir.joinpath('model.png'),
+                              show_shapes=True,
+                              show_dtype=True,
+                              show_layer_names=True)
 
-    train_dataset = train_dataset.map(lambda f, data: data)
-    test_dataset = test_dataset.map(lambda f, data: data)
+    csv_back = tf.keras.callbacks.CSVLogger(filename=log_dir.joinpath('train.csv'), append=False)
+    tb_back = tf.keras.callbacks.TensorBoard(log_dir=log_dir,
+                                             update_freq=10,
+                                             histogram_freq=0,
+                                             profile_batch=0,
+                                             write_graph=False)
+    chk_back = CheckpointCallback(filepath=chk_dir.joinpath('model.{batch:02d}.weights'),
+                                  verbose=1,
+                                  monitor='loss',
+                                  save_freq=args.checkpoint_every,
+                                  save_weights_only=True)
 
-    return train_dataset, test_dataset
+    if args.no_early_stopping:
+        callbacks = [csv_back, tb_back, chk_back]
+    else:
+        early_back = tf.keras.callbacks.EarlyStopping(monitor='val_loss' if args.validate else 'loss',
+                                                      min_delta=0,
+                                                      patience=5,
+                                                      mode='min',
+                                                      restore_best_weights=True)
 
+        callbacks = [csv_back, tb_back, early_back, chk_back]
 
-def get_task_data(args):
-    """
-    Return a tf.data.Dataset object containing the data and labels loaded for the selected task.
-    :param args: command line arguments
-    :return: td.data.Dataset, number of labels, number of private variable labels
-    """
-    data = load_dataset('trust_dataset.py',
-                        'uk',
-                        cache_dir=args.cache_dir,
-                        split=f'train[:{int(args.data_split * 100)}%]')
-    n_labels = len(data.unique('label'))
-    n_priv_labels = len(data.unique('priv_label'))
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', cache_dir=args.cache_dir, do_lower_case=True)
-    logging.debug("Applying tokenization...")
-    data = data.map(lambda e: tokenizer(e['text'],
-                                        truncation=True,
-                                        padding='max_length',
-                                        max_length=args.max_length,
-                                        add_special_tokens=True,
-                                        return_token_type_ids=False),
-                    batched=True)
-    logging.debug("Tokenization complete.")
-    logging.debug("Converting to TF tensors...")
-    data.set_format(type='tensorflow', columns=['input_ids', 'attention_mask', 'label', 'priv_label'])
+    if args.validate:
+        model_history = model.fit(train_ds,
+                                  epochs=args.epochs,
+                                  validation_data=val_ds,
+                                  callbacks=callbacks)
+    else:
+        model_history = model.fit(train_ds,
+                                  epochs=args.epochs,
+                                  callbacks=callbacks)
 
-    train_features = {x: data[x].to_tensor(default_value=0, shape=[None, args.max_length]) for x in
-                      ['input_ids', 'attention_mask']}
-    labels = tf.keras.utils.to_categorical(data['label'], num_classes=n_labels)
-    priv_labels = tf.keras.utils.to_categorical(data['priv_label'], num_classes=n_priv_labels)
-    label_dict = {"base": labels, "attacker": priv_labels}
-    logging.debug("Converted.")
-    logging.debug("Creating TF dataset...")
-    dataset = tf.data.Dataset.from_tensor_slices((train_features, label_dict)).batch(args.batch_size)
-    logging.debug("Dataset created.")
-    return dataset, n_labels, n_priv_labels
+    result = model.evaluate(test_ds)
+    with open(log_dir.joinpath('test.csv'), 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=model.metrics_names)
+        result = dict(zip(model.metrics_names, result))
+        writer.writeheader()
+        writer.writerow(result)
+
+    return model_history
 
 
 def main():
@@ -81,6 +90,13 @@ def main():
         default='logs',
         type=str,
         help="The logging directory.",
+    )
+
+    parser.add_argument(
+        "--tag",
+        default=None,
+        type=str,
+        help="Tag to add to logs for run identification."
     )
 
     parser.add_argument(
@@ -106,9 +122,9 @@ def main():
 
     parser.add_argument(
         "--epochs",
-        default=15,
+        default=20,
         type=int,
-        help="Total number of training epochs to perform. Defaults to 15.",
+        help="Total number of training epochs to perform. Defaults to 20.",
     )
 
     parser.add_argument(
@@ -131,24 +147,37 @@ def main():
     )
 
     parser.add_argument(
-        "--data_split",
-        default=1.0,
+        "--adversarial",
+        action='store_true',
+        help="Train with an adversarial objective. Defaults to False."
+    )
+
+    parser.add_argument(
+        "--dropout_rate",
+        default=None,
         type=float,
-        help="Proportion of total dataset to use. Defaults to 1.0."
+        help="How much dropout to apply after feature extractor. Expects a float in range [0,1]."
+    )
+
+    parser.add_argument(
+        "--data_split",
+        default=None,
+        type=int,
+        help="Number of rows from total dataset to use."
     )
 
     parser.add_argument(
         "--train_split",
         default=0.7,
         type=float,
-        help="Proportion of available data to use in training. Defaults to 0.7."
+        help="Proportion of available data to use in training. Expects a float in range [0,1]. Defaults to 0.7."
     )
 
     parser.add_argument(
         "--val_split",
         default=0.2,
         type=float,
-        help="Proportion of training data to use in validation. Defaults to 0.2.",
+        help="Proportion of training data to use in validation. Expects a float in range [0,1]. Defaults to 0.2.",
     )
 
     parser.add_argument(
@@ -159,9 +188,9 @@ def main():
 
     parser.add_argument(
         "--checkpoint_every",
-        default=100,
+        default=1_000,
         type=int,
-        help="Number of training batches to save a checkpoint after. Defaults to 100."
+        help="Number of training batches to save a checkpoint after. Defaults to 1_000."
     )
 
     parser.add_argument(
@@ -177,6 +206,13 @@ def main():
         help="Length of embedding. Defaults to 768."
     )
 
+    parser.add_argument(
+        "--hplambda",
+        default=1.0,
+        type=float,
+        help="Regularization parameter for the gradient reversal layer. Defaults to 1.0."
+    )
+
     args = parser.parse_args()
 
     logging.basicConfig(format='%(asctime)s - %(message)s', datefmt='%d-%m-%y %H:%M:%S', level=logging.DEBUG)
@@ -187,41 +223,12 @@ def main():
         physical_devices = tf.config.list_physical_devices('GPU')
         tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
-    dataset, n_labels, n_priv_labels = get_task_data(args)
-    train_ds, test_ds = split_dataset(dataset, args.train_split)
-    if args.validate:
-        val_ds, train_ds = split_dataset(dataset, args.val_split)
-    else:
-        val_ds = None
+    train_ds, test_ds, val_ds, n_labels, n_priv_labels = get_task_data(args)
 
-    model_builder = models.ClassifierBuilder(args)
+    model = ClassifierBuilder(args).get_classifier(n_labels, n_priv_labels, "combined_classifier")
 
-    classifier = model_builder.get_classifier(n_labels, n_priv_labels, "base_classifier")
-
-    now = datetime.datetime.now().strftime('%Y%m%d')
-    log_dir = pathlib.Path.cwd().joinpath(args.log_dir)
-    with open(log_dir.joinpath('base_cls_summary.txt'), 'w') as f:
-        with redirect_stdout(f):
-            classifier.summary()
-
-    csv_back = CSVLogger(filename=log_dir.joinpath('train.csv'), append=False)
-    tb_back = tf.keras.callbacks.TensorBoard(log_dir=log_dir,
-                                             update_freq=10,
-                                             histogram_freq=1,
-                                             write_graph=False)
-    callbacks = [csv_back, tb_back]
-
-    model_history = classifier.fit(train_ds,
-                                   epochs=args.epochs,
-                                   validation_data=val_ds,
-                                   callbacks=callbacks)
-
-    result = classifier.evaluate(test_ds)
-    with open(log_dir.joinpath('test.csv'), 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=classifier.metrics_names)
-        result = dict(zip(classifier.metrics_names, result))
-        writer.writeheader()
-        writer.writerow(result)
+    history = run_model(model, args, train_ds=train_ds, test_ds=test_ds, val_ds=val_ds)
+    logging.debug(history.history)
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ datasets==1.2.1
 dill==0.3.3
 filelock==3.0.12
 flatbuffers==1.12
+fsspec==0.8.5
 gast==0.3.3
 google-auth==1.24.0
 google-auth-oauthlib==0.4.2
@@ -29,6 +30,7 @@ protobuf==3.14.0
 pyarrow==2.0.0
 pyasn1==0.4.8
 pyasn1-modules==0.2.8
+pydot==1.4.1
 pyparsing==2.4.7
 python-dateutil==2.8.1
 pytz==2020.5
@@ -48,7 +50,7 @@ tensorflow-estimator==2.4.0
 termcolor==1.1.0
 threadpoolctl==2.1.0
 tokenizers==0.9.4
-tqdm==4.49.0
+tqdm==4.56.0
 transformers==4.2.1
 typing-extensions==3.7.4.3
 urllib3==1.26.2

@@ -17,9 +17,8 @@ from __future__ import absolute_import, division, print_function
 import os
 import json
 import datasets
-from utils import Utils
+from utils import clean_file
 import pandas as pd
-from tensorflow import keras
 
 
 _DESCRIPTION = """\
@@ -44,13 +43,15 @@ _HOMEPAGE = "https://bitbucket.org/lowlands/release/src/master/"
 _LICENSE = ""
 
 _URLs = {
-    'uk': "https://bitbucket.org/lowlands/release/raw/fd60e8b4fbb12f0175e0f26153e289bbe2bfd71c/WWW2015/data/united_kingdom.auto-adjusted_gender.NUTS-regions.jsonl.zip",
-    'us': "https://bitbucket.org/lowlands/release/raw/fd60e8b4fbb12f0175e0f26153e289bbe2bfd71c/WWW2015/data/united_states.auto-adjusted_gender.geocoded.jsonl.zip"
+    'uk': "https://bitbucket.org/lowlands/release/raw/fd60e8b4fbb12f0175e0f26153e289bbe2bfd71c/WWW2015/data"
+          "/united_kingdom.auto-adjusted_gender.NUTS-regions.jsonl.zip",
+    'us': "https://bitbucket.org/lowlands/release/raw/fd60e8b4fbb12f0175e0f26153e289bbe2bfd71c/WWW2015/data"
+          "/united_states.auto-adjusted_gender.geocoded.jsonl.zip "
 }
 
 
 class TrustDataset(datasets.GeneratorBasedBuilder):
-    
+
     VERSION = datasets.Version("1.0.0")
 
     BUILDER_CONFIGS = [
@@ -85,7 +86,7 @@ class TrustDataset(datasets.GeneratorBasedBuilder):
         data_dir = dl_manager.download_and_extract(my_urls)
         for filename in os.listdir(data_dir):
             if filename.endswith('.jsonl.tmp'):
-                clean = Utils.clean_file(os.path.join(data_dir, filename))
+                clean = clean_file(os.path.join(data_dir, filename))
                 df = pd.DataFrame(clean)
                 df['rating'] = df['rating'] - 1
                 df['gender'] = df['gender'].astype('category').cat.codes

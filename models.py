@@ -1,6 +1,15 @@
 from tensorflow import keras
 from tensorflow.keras import layers
+from tensorflow import reduce_mean
 from transformers import TFBertModel, BertConfig
+from tensorflow.keras.metrics import CategoricalAccuracy, Precision, Recall, AUC
+from flipGradientTF import GradientReversal
+
+
+class CheckpointCallback(keras.callbacks.ModelCheckpoint):
+    def on_train_batch_end(self, batch, logs=None):
+        logs['batch'] = batch
+        super(CheckpointCallback, self).on_train_batch_end(batch, logs)
 
 
 class ClassifierBuilder:
@@ -10,6 +19,9 @@ class ClassifierBuilder:
         self.embed_length = args.embed_length
         self.max_length = args.max_length
         self.cache = args.cache_dir
+        self.dropout = args.dropout_rate
+        self.adversarial = args.adversarial
+        self.hplambda = args.hplambda
 
     def get_classifier(self, n_labels: int, n_priv_labels: int, name: str):
         """
@@ -31,15 +43,19 @@ class ClassifierBuilder:
         input_ids = layers.Input(shape=(self.max_length,), dtype='int32')
         attention_mask = layers.Input(shape=(self.max_length,), dtype='int32')
         embedding = embed_model(input_ids, attention_mask=attention_mask).last_hidden_state
-        pooled = embedding[:, 0, :]
-        learnable = layers.Dense(self.embed_length, activation='relu')(pooled)
+        x = reduce_mean(embedding, axis=1, name='mean_embedding')
+        if self.dropout:
+            x = layers.Dropout(self.dropout)(x)
+        x = layers.Dense(self.embed_length, activation='relu', name='feature_learn')(x)
 
         # target task classifier
-        linear = layers.Dense(self.hidden, activation='relu')(learnable)
+        linear = layers.Dense(self.hidden, activation='relu')(x)
         preds = layers.Dense(n_labels, activation='softmax', name="base")(linear)
 
         # adversary classifier
-        a_linear = layers.Dense(self.hidden, activation='relu')(learnable)
+        if self.adversarial:
+            x = GradientReversal(self.hplambda)(x)
+        a_linear = layers.Dense(self.hidden, activation='relu')(x)
         a_preds = layers.Dense(n_priv_labels, activation='softmax', name="attacker")(a_linear)
 
         model = keras.Model(inputs={"input_ids": input_ids, "attention_mask": attention_mask},
@@ -48,17 +64,18 @@ class ClassifierBuilder:
 
         model.compile(optimizer=keras.optimizers.Adam(),
                       loss={
-                          "base": keras.losses.CategoricalCrossentropy(),
-                          "attacker": keras.losses.CategoricalCrossentropy()
+                          "base": keras.losses.CategoricalCrossentropy(name='loss'),
+                          "attacker": keras.losses.CategoricalCrossentropy(name='loss')
                       },
                       metrics={
-                          "base": ['accuracy',
-                                   keras.metrics.Precision(name='base_precision'),
-                                   keras.metrics.Recall(name='base_recall')],
-                          "attacker": ['accuracy',
-                                       keras.metrics.Precision(name='attacker_precision'),
-                                       keras.metrics.Recall(name='attacker_recall')]
+                          "base": [CategoricalAccuracy(name='acc'),
+                                   Precision(name='prec'),
+                                   Recall(name='rec'),
+                                   AUC(name='auc')],
+                          "attacker": [CategoricalAccuracy(name='acc'),
+                                       Precision(name='prec'),
+                                       Recall(name='rec'),
+                                       AUC(name='auc')]
                       })
 
         return model
-
