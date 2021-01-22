@@ -4,9 +4,10 @@ cachetools==4.2.0
 certifi==2020.12.5
 chardet==4.0.0
 click==7.1.2
+datasets==1.2.1
+dill==0.3.3
 filelock==3.0.12
 flatbuffers==1.12
-flatten-dict==0.3.0
 gast==0.3.3
 google-auth==1.24.0
 google-auth-oauthlib==0.4.2
@@ -17,6 +18,7 @@ idna==2.10
 joblib==1.0.0
 Keras-Preprocessing==1.1.2
 Markdown==3.3.3
+multiprocess==0.70.11.1
 numpy==1.19.5
 oauthlib==3.1.0
 opt-einsum==3.3.0
@@ -24,6 +26,7 @@ packaging==20.8
 pandas==1.2.0
 pathlib2==2.3.5
 protobuf==3.14.0
+pyarrow==2.0.0
 pyasn1==0.4.8
 pyasn1-modules==0.2.8
 pyparsing==2.4.7
@@ -45,9 +48,10 @@ tensorflow-estimator==2.4.0
 termcolor==1.1.0
 threadpoolctl==2.1.0
 tokenizers==0.9.4
-tqdm==4.56.0
+tqdm==4.49.0
 transformers==4.2.1
 typing-extensions==3.7.4.3
 urllib3==1.26.2
 Werkzeug==1.0.1
 wrapt==1.12.1
+xxhash==2.0.0

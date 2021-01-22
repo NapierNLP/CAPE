@@ -150,6 +150,7 @@ crashlytics.properties
 crashlytics-build.properties
 fabric.properties
 
+cache/
 data/
 logs/
 *summary.txt
