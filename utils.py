@@ -2,6 +2,8 @@ import ast
 import tensorflow as tf
 from datasets import load_dataset, DatasetDict
 from transformers import BertTokenizer
+from sklearn.utils.class_weight import compute_sample_weight
+from numpy import array
 import logging
 
 
@@ -23,9 +25,10 @@ def clean_file(file):
     return clean_list
 
 
-def get_tf_dataset(ds, n_labels, n_priv_labels, args):
+def get_tf_dataset(ds, n_labels, n_priv_labels, sample_weights=None, args=None):
     """
     Return a tf.data.Dataset from a datasets.Dataset.
+    :param sample_weights: weighting to apply to each sample in training batches to compensate for class imbalances
     :param ds: datasets.Dataset to copy
     :param n_labels: number of possible labels
     :param n_priv_labels: number of possible labels for private variable
@@ -37,7 +40,14 @@ def get_tf_dataset(ds, n_labels, n_priv_labels, args):
     labels = tf.keras.utils.to_categorical(ds['label'], num_classes=n_labels)
     priv_labels = tf.keras.utils.to_categorical(ds['priv_label'], num_classes=n_priv_labels)
     label_dict = {"base": labels, "attacker": priv_labels}
-    dataset = tf.data.Dataset.from_tensor_slices((features, label_dict)).batch(args.batch_size).prefetch(1)
+    if sample_weights is None:
+        dataset = tf.data.Dataset.from_tensor_slices((features, label_dict)) \
+            .batch(args.batch_size) \
+            .prefetch(1)
+    else:
+        dataset = tf.data.Dataset.from_tensor_slices((features, label_dict, sample_weights)) \
+            .batch(args.batch_size) \
+            .prefetch(1)
     return dataset
 
 
@@ -51,6 +61,7 @@ def get_task_data(args):
                         'uk',
                         cache_dir=args.cache_dir,
                         split=f'train{f"[:{args.data_split}]" if args.data_split else ""}')
+
     train_test = data.train_test_split(train_size=args.train_split, shuffle=not args.no_shuffle)
     if args.validate:
         train_valid = train_test['train'].train_test_split(test_size=args.val_split)
@@ -64,6 +75,11 @@ def get_task_data(args):
             'train': train_test['train'].flatten_indices(),
             'test': train_test['test'].flatten_indices()
         })
+
+    # Get a sample weighting vector to balance output classes
+    labels = array(list(zip(data['train']['label'], data['train']['priv_label'])))
+    sample_weights = compute_sample_weight("balanced", labels)
+
     n_labels = len(data['train'].unique('label'))
     n_priv_labels = len(data['train'].unique('priv_label'))
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', cache_dir=args.cache_dir, do_lower_case=True)
@@ -78,11 +94,12 @@ def get_task_data(args):
     logging.debug("Tokenization complete.")
     logging.debug("Creating TF datasets...")
     data.set_format(type='tensorflow', columns=['input_ids', 'attention_mask', 'label', 'priv_label'])
-    train_ds = get_tf_dataset(data['train'], n_labels, n_priv_labels, args)
-    test_ds = get_tf_dataset(data['test'], n_labels, n_priv_labels, args)
+    train_ds = get_tf_dataset(data['train'], n_labels, n_priv_labels, sample_weights, args=args)
+    test_ds = get_tf_dataset(data['test'], n_labels, n_priv_labels, args=args)
     if args.validate:
-        val_ds = get_tf_dataset(data['val'], n_labels, n_priv_labels, args)
+        val_ds = get_tf_dataset(data['val'], n_labels, n_priv_labels, args=args)
     else:
         val_ds = None
     logging.debug("Datasets created.")
+
     return train_ds, test_ds, val_ds, n_labels, n_priv_labels

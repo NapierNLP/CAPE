@@ -4,8 +4,11 @@ cachetools==4.2.0
 certifi==2020.12.5
 chardet==4.0.0
 click==7.1.2
+cloudpickle==1.6.0
 datasets==1.2.1
+decorator==4.4.2
 dill==0.3.3
+dm-tree==0.1.5
 filelock==3.0.12
 flatbuffers==1.12
 fsspec==0.8.5
@@ -44,9 +47,10 @@ scipy==1.6.0
 six==1.15.0
 sklearn==0.0
 tensorboard==2.4.1
-tensorboard-plugin-wit==1.7.0
+tensorboard-plugin-wit==1.8.0
 tensorflow==2.4.0
 tensorflow-estimator==2.4.0
+tensorflow-probability==0.12.1
 termcolor==1.1.0
 threadpoolctl==2.1.0
 tokenizers==0.9.4

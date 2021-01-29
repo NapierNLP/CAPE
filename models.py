@@ -1,9 +1,10 @@
-from tensorflow import keras
+from tensorflow import keras, constant
 from tensorflow.keras import layers
-from tensorflow import reduce_mean
+from tensorflow import reduce_mean, reduce_min, reduce_max, reshape
 from transformers import TFBertModel, BertConfig
 from tensorflow.keras.metrics import CategoricalAccuracy, Precision, Recall, AUC
 from flipGradientTF import GradientReversal
+from tensorflow_probability import distributions as tfd
 
 
 class CheckpointCallback(keras.callbacks.ModelCheckpoint):
@@ -22,10 +23,17 @@ class ClassifierBuilder:
         self.dropout = args.dropout_rate
         self.adversarial = args.adversarial
         self.hplambda = args.hplambda
+        self.dp = args.dp
+        self.epsilon = args.epsilon
+        self.tuning = args.tuning
+        if self.tuning:
+            self.dp = True
+            self.adversarial = True
 
-    def get_classifier(self, n_labels: int, n_priv_labels: int, name: str):
+    def get_classifier(self, n_labels: int, n_priv_labels: int, name: str, hparams=None):
         """
         Return an end-to-end classifier that takes a set of tokenized inputs and learns to predict labels.
+        :param hparams: values for hyperparameter tuning
         :param n_labels: number of possible label values to predict
         :param n_priv_labels: number of possible values of private information label
         :param name: name to attach to the model
@@ -42,20 +50,40 @@ class ClassifierBuilder:
 
         input_ids = layers.Input(shape=(self.max_length,), dtype='int32')
         attention_mask = layers.Input(shape=(self.max_length,), dtype='int32')
-        embedding = embed_model(input_ids, attention_mask=attention_mask).last_hidden_state
-        x = reduce_mean(embedding, axis=1, name='mean_embedding')
+        sequence_embedding = embed_model(input_ids, attention_mask=attention_mask).last_hidden_state
+        x = reduce_mean(sequence_embedding, axis=1, name='mean_embedding')
+
+        if self.dp:
+            embed_min = reduce_min(x, keepdims=True)
+            embed_max = reduce_max(x, keepdims=True)
+            x = (x - embed_min) / (embed_max - embed_min)
+            if self.tuning:
+                noise = tfd.Laplace(constant([0.0]), constant([1.0 / hparams['HP_EPSILON']]))
+            else:
+                noise = tfd.Laplace(constant([0.0]), constant([1.0 / self.epsilon]))
+            noise_s = noise.sample(sample_shape=self.embed_length)
+            x += reshape(noise_s, shape=(-1))
+
         if self.dropout:
             x = layers.Dropout(self.dropout)(x)
-        x = layers.Dense(self.embed_length, activation='relu', name='feature_learn')(x)
+
+        features = layers.Dense(units=hparams['HP_NUM_UNITS'] if self.tuning else self.hidden,
+                                activation='relu',
+                                name='feature_learn')(x)
 
         # target task classifier
-        linear = layers.Dense(self.hidden, activation='relu')(x)
+        linear = layers.Dense(units=hparams['HP_NUM_UNITS'] if self.tuning else self.hidden,
+                              activation='relu')(features)
         preds = layers.Dense(n_labels, activation='softmax', name="base")(linear)
 
         # adversary classifier
         if self.adversarial:
-            x = GradientReversal(self.hplambda)(x)
-        a_linear = layers.Dense(self.hidden, activation='relu')(x)
+            reversal = GradientReversal(hp_lambda=hparams['HP_LAMBDA'] if self.tuning else self.hplambda)(features)
+            a_linear = layers.Dense(units=hparams['HP_NUM_UNITS'] if self.tuning else self.hidden,
+                                    activation='relu')(reversal)
+        else:
+            a_linear = layers.Dense(units=hparams['HP_NUM_UNITS'] if self.tuning else self.hidden,
+                                    activation='relu')(features)
         a_preds = layers.Dense(n_priv_labels, activation='softmax', name="attacker")(a_linear)
 
         model = keras.Model(inputs={"input_ids": input_ids, "attention_mask": attention_mask},
