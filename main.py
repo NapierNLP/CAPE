@@ -1,33 +1,50 @@
 import argparse
 import logging
 import pathlib
-from datetime import datetime
+import csv
 from contextlib import redirect_stdout
 import tensorflow as tf
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from models import ClassifierBuilder
-from utils import get_task_data
-from tensorboard.plugins.hparams import api as hp
+from utils import get_task_data, prepare_data
+from numpy import zeros
+
+
+def test_model(model, args, test_ds, log_dir=None):
+    """
+    Evaluate trained model
+    :param model: trained keras.Model instance
+    :param args: program arguments
+    :param test_ds: pandas Dataframe test data
+    :param log_dir: pathlib.Path directory to log to
+    :return: dictionary of {metric_name: list of metric results}
+    """
+
+    test_x, test_y = prepare_data(test_ds, args)
+    result = model.evaluate(test_x,
+                            test_y,
+                            batch_size=args.batch_size,
+                            callbacks=[])
+    with open(log_dir.joinpath('test.csv'), encoding='utf-8', mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(model.metrics_names)
+        writer.writerow(result)
+
+    return dict(zip(model.metrics_names, result))
 
 
 def run_model(model: tf.keras.Model,
               args,
-              train_ds: tf.data.Dataset,
-              val_ds: tf.data.Dataset = None,
-              log_dir=None):
+              train_ds,
+              log_dir: pathlib.Path = None):
     """
-    Fit and evaluate model on train/validate/test datasets.
-    :param log_dir:
-    :param model: keras.Model instance to run.
+    Fit model on train/validate/test datasets.
+    :param log_dir: pathlib.Path directory to log to
+    :param model: keras.Model instance to run
     :param args: program arguments
-    :param train_ds: tf.data.Dataset containing training examples
-    :param val_ds: tf.data.Dataset containing validation examples
-    :return: a keras History object
+    :param train_ds: pandas Dataframe training examples
+    :return: keras History object
     """
-
-    if not args.tuning:
-        now = datetime.now().strftime('%y%m%d-%H%M%S')
-        log_dir = log_dir.joinpath(f"{now}{f'-{args.tag}' if args.tag else ''}")
-        log_dir.mkdir()
 
     with open(log_dir.joinpath('cls_summary.txt'), 'w') as f:
         with redirect_stdout(f):
@@ -39,49 +56,40 @@ def run_model(model: tf.keras.Model,
                               show_dtype=True,
                               show_layer_names=True)
 
+    callbacks = []
+    if args.validate:
+        train_ds, val_ds = train_test_split(train_ds,
+                                            random_state=42,
+                                            test_size=args.val_split,
+                                            stratify=train_ds[['rating']],
+                                            shuffle=not args.no_shuffle)
+        val_data = (prepare_data(val_ds, args))
+
     csv_back = tf.keras.callbacks.CSVLogger(filename=log_dir.joinpath('train.csv'), append=False)
     tb_back = tf.keras.callbacks.TensorBoard(log_dir=log_dir,
                                              update_freq='epoch',
                                              histogram_freq=0,
                                              profile_batch=0,
                                              write_graph=False)
+    callbacks.extend([csv_back, tb_back])
 
-    if args.no_early_stopping:
-        callbacks = [csv_back, tb_back]
-    else:
+    if not args.no_early_stopping:
         early_back = tf.keras.callbacks.EarlyStopping(monitor='val_base_loss' if args.validate else 'base_loss',
                                                       min_delta=0,
-                                                      patience=5,
+                                                      patience=3,
                                                       mode='min',
                                                       restore_best_weights=True)
+        callbacks.append(early_back)
 
-        callbacks = [csv_back, tb_back, early_back]
+    train_x, train_y = prepare_data(train_ds, args)
 
-    if args.validate:
-        model_history = model.fit(train_ds,
-                                  epochs=args.epochs,
-                                  validation_data=val_ds,
-                                  callbacks=callbacks)
-    else:
-        model_history = model.fit(train_ds,
-                                  epochs=args.epochs,
-                                  callbacks=callbacks)
+    model_history = model.fit(train_x,
+                              train_y,
+                              batch_size=args.batch_size,
+                              epochs=args.epochs,
+                              validation_data=val_data if args.validate else None,
+                              callbacks=callbacks)
     return model_history
-
-
-def run_tune(model: tf.keras.Model, log_dir, hparams: dict, args, train_ds: tf.data.Dataset, val_ds: tf.data.Dataset, test_ds: tf.data.Dataset):
-    with tf.summary.create_file_writer(str(log_dir)).as_default():
-        hp.hparams(hparams)
-        run_model(model,
-                  args,
-                  train_ds=train_ds,
-                  val_ds=val_ds,
-                  log_dir=log_dir)
-        metrics = model.evaluate(test_ds, verbose=1)
-        for idx, metric in enumerate(model.metrics_names):
-            if metric in ['base_acc', 'base_prec', 'base_rec', 'attacker_acc', 'attacker_prec', 'attacker_rec']:
-                logging.debug(f'{metric}: {metrics[idx]}')
-                tf.summary.scalar(metric, metrics[idx], step=1)
 
 
 def main():
@@ -155,10 +163,10 @@ def main():
     )
 
     parser.add_argument(
-        "--dropout_rate",
-        default=None,
+        "--dropout",
+        default=0.4,
         type=float,
-        help="How much dropout to apply after feature extractor. Expects a float in range [0,1]."
+        help="How much dropout to apply. Expects a float in range [0,1]. Defaults to 0.4."
     )
 
     parser.add_argument(
@@ -222,9 +230,23 @@ def main():
     )
 
     parser.add_argument(
-        "--tuning",
+        "--balance",
         action="store_true",
-        help="Tensorboard Hparam tuning. Will ignore dropout, epsilon, hidden size switches. Defaults to False."
+        help="Balance class weights. Defaults False."
+    )
+
+    parser.add_argument(
+        "--learning_rate",
+        default=0.0001,
+        type=float,
+        help="Learning rate for optimiser. Defaults to 0.0001."
+    )
+
+    parser.add_argument(
+        "--cv",
+        default=4,
+        type=int,
+        help="Number of cross-validation runs to do. Defaults to 4."
     )
 
     args = parser.parse_args()
@@ -237,63 +259,31 @@ def main():
         physical_devices = tf.config.list_physical_devices('GPU')
         tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
-    train_ds, test_ds, val_ds, n_labels, n_priv_labels = get_task_data(args)
-    cls = ClassifierBuilder(args)
+    ds = get_task_data(args)
+    skf = StratifiedKFold(n_splits=args.cv, random_state=42, shuffle=True)
 
-    if args.tuning:
-        HP_NUM_UNITS = hp.HParam('num_units', hp.Discrete([128, 256, 512]))
-        HP_EPSILON = hp.HParam('epsilon', hp.Discrete([0.01, 0.1, 0.5, 0.9]))
-        HP_LAMBDA = hp.HParam('lambda', hp.Discrete([0.1, 0.5, 1.0]))
+    split = 1
+    for train_idx, test_idx in skf.split(X=zeros(len(ds)), y=ds.rating):
+        train_ds = ds.iloc[train_idx]
+        test_ds = ds.iloc[test_idx]
 
-        log_dir = pathlib.Path.cwd().joinpath('logs', 'hparam_tuning')
-        with tf.summary.create_file_writer(str(log_dir)).as_default():
-            hp.hparams_config(
-                hparams=[HP_NUM_UNITS, HP_EPSILON, HP_LAMBDA],
-                metrics=[hp.Metric('base_acc', display_name='Base Accuracy'),
-                         hp.Metric('base_prec', display_name='Base Precision'),
-                         hp.Metric('base_rec', display_name='Base Recall'),
-                         hp.Metric('attacker_acc', display_name='Attacker Accuracy'),
-                         hp.Metric('attacker_prec', display_name='Attacker Precision'),
-                         hp.Metric('attacker_rec', display_name='Attacker Recall')]
-            )
-
-            session_num = 0
-            for num_units in HP_NUM_UNITS.domain.values:
-                for epsilon in HP_EPSILON.domain.values:
-                    for lbd in HP_LAMBDA.domain.values:
-                        hparams = {
-                            'HP_NUM_UNITS': num_units,
-                            'HP_EPSILON': epsilon,
-                            'HP_LAMBDA': lbd
-                        }
-                        run_name = "run-%d" % session_num
-                        logging.debug('--- Starting trial: %s' % run_name)
-                        logging.debug({h: hparams[h] for h in hparams})
-
-                        model = cls.get_classifier(n_labels,
-                                                   n_priv_labels,
-                                                   "combined_classifier",
-                                                   hparams)
-
-                        run_tune(model=model,
-                                 log_dir=log_dir.joinpath(str(session_num)),
-                                 hparams=hparams,
-                                 args=args,
-                                 train_ds=train_ds,
-                                 val_ds=val_ds,
-                                 test_ds=test_ds)
-
-                        session_num += 1
-                        del model
-    else:
-        log_dir = args.log_dir
-        model = cls.get_classifier(n_labels, n_priv_labels, "combined_classifier")
+        model = ClassifierBuilder(args).get_classifier(ds.rating.nunique(),
+                                                       ds.gender.nunique(),
+                                                       "combined_classifier")
+        log_dir = pathlib.Path.cwd().joinpath(args.log_dir)
+        log_dir = log_dir.joinpath(f"{f'{args.tag}' if args.tag else ''}_{split}")
+        log_dir.mkdir(parents=True, exist_ok=True)
         history = run_model(model,
                             args,
                             train_ds=train_ds,
-                            val_ds=val_ds,
                             log_dir=log_dir)
-        logging.debug(history)
+        logging.debug(history.history)
+        result = test_model(model,
+                            args,
+                            test_ds=test_ds,
+                            log_dir=log_dir)
+        logging.debug(result)
+        split += 1
 
 
 if __name__ == '__main__':

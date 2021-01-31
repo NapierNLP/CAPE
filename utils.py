@@ -1,13 +1,21 @@
 import ast
-import tensorflow as tf
-from datasets import load_dataset, DatasetDict
-from transformers import BertTokenizer
-from sklearn.utils.class_weight import compute_sample_weight
-from numpy import array
+import os
+import pathlib
+from io import BytesIO
+from urllib.request import urlopen
+from zipfile import ZipFile
+import pandas as pd
 import logging
+from tensorflow.keras.utils import to_categorical
+from transformers import BertTokenizer
 
 
 def clean_file(file):
+    """
+    Clean up downloaded jsonl file
+    :param file: downloaded file
+    :return: list of Python dicts
+    """
     clean_list = []
     if file.endswith('.jsonl.tmp'):
         with open(file, encoding='utf-8', mode='r') as f:
@@ -25,81 +33,63 @@ def clean_file(file):
     return clean_list
 
 
-def get_tf_dataset(ds, n_labels, n_priv_labels, sample_weights=None, args=None):
-    """
-    Return a tf.data.Dataset from a datasets.Dataset.
-    :param sample_weights: weighting to apply to each sample in training batches to compensate for class imbalances
-    :param ds: datasets.Dataset to copy
-    :param n_labels: number of possible labels
-    :param n_priv_labels: number of possible labels for private variable
-    :param args: program arguments
-    :return: tf.data.Dataset
-    """
-    features = {x: ds[x].to_tensor(default_value=0, shape=[None, args.max_length])
-                for x in ['input_ids', 'attention_mask']}
-    labels = tf.keras.utils.to_categorical(ds['label'], num_classes=n_labels)
-    priv_labels = tf.keras.utils.to_categorical(ds['priv_label'], num_classes=n_priv_labels)
-    label_dict = {"base": labels, "attacker": priv_labels}
-    if sample_weights is None:
-        dataset = tf.data.Dataset.from_tensor_slices((features, label_dict)) \
-            .batch(args.batch_size) \
-            .prefetch(1)
-    else:
-        dataset = tf.data.Dataset.from_tensor_slices((features, label_dict, sample_weights)) \
-            .batch(args.batch_size) \
-            .prefetch(1)
-    return dataset
-
-
 def get_task_data(args):
     """
-    Return a set of tf.data.Dataset objects containing the data and labels loaded for the selected task.
+    Return the data and labels loaded for the selected task.
     :param args: program arguments
-    :return: train dataset, test dataset, validation dataset, number of labels, number of private variable labels
+    :return: pandas Dataframe
     """
-    data = load_dataset('trust_dataset.py',
-                        'uk',
-                        cache_dir=args.cache_dir,
-                        split=f'train{f"[:{args.data_split}]" if args.data_split else ""}')
+    url = "https://bitbucket.org/lowlands/release/raw/fd60e8b4fbb12f0175e0f26153e289bbe2bfd71c/WWW2015/data/united_kingdom.auto-adjusted_gender.NUTS-regions.jsonl.zip"
 
-    train_test = data.train_test_split(train_size=args.train_split, shuffle=not args.no_shuffle)
-    if args.validate:
-        train_valid = train_test['train'].train_test_split(test_size=args.val_split)
-        data = DatasetDict({
-            'train': train_valid['train'].flatten_indices(),
-            'test': train_test['test'].flatten_indices(),
-            'val': train_valid['test'].flatten_indices()
-        })
-    else:
-        data = DatasetDict({
-            'train': train_test['train'].flatten_indices(),
-            'test': train_test['test'].flatten_indices()
-        })
+    data_dir = pathlib.Path.cwd().joinpath(args.cache_dir, 'data')
+    data_dir.mkdir(exist_ok=True, parents=True)
 
-    # Get a sample weighting vector to balance output classes
-    labels = array(list(zip(data['train']['label'], data['train']['priv_label'])))
-    sample_weights = compute_sample_weight("balanced", labels)
+    if not data_dir.joinpath('data.json').is_file():
+        logging.debug("Downloading and extracting...")
+        with urlopen(url) as zipresp:
+            with ZipFile(BytesIO(zipresp.read())) as zfile:
+                zfile.extractall(str(data_dir))
+        logging.debug("Downloaded.")
+        logging.debug("Cleaning and saving data...")
+        for filename in os.listdir(data_dir):
+            if filename.endswith('.jsonl.tmp'):
+                clean = clean_file(os.path.join(data_dir, filename))
+                df = pd.DataFrame(clean)
+                df['gender'] = df['gender'].astype('category').cat.codes.astype(int)
+                df['rating'] = df.rating.astype(int)
+                with open(data_dir.joinpath("data.json"), encoding='utf-8', mode='w') as f:
+                    df.to_json(f, orient='records', lines=True)
+        logging.debug("Saved.")
 
-    n_labels = len(data['train'].unique('label'))
-    n_priv_labels = len(data['train'].unique('priv_label'))
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', cache_dir=args.cache_dir, do_lower_case=True)
-    logging.debug("Applying tokenization...")
-    data = data.map(lambda e: tokenizer(e['text'],
-                                        truncation=True,
-                                        padding='max_length',
-                                        max_length=args.max_length,
-                                        add_special_tokens=True,
-                                        return_token_type_ids=False),
-                    batched=True)
-    logging.debug("Tokenization complete.")
-    logging.debug("Creating TF datasets...")
-    data.set_format(type='tensorflow', columns=['input_ids', 'attention_mask', 'label', 'priv_label'])
-    train_ds = get_tf_dataset(data['train'], n_labels, n_priv_labels, sample_weights, args=args)
-    test_ds = get_tf_dataset(data['test'], n_labels, n_priv_labels, args=args)
-    if args.validate:
-        val_ds = get_tf_dataset(data['val'], n_labels, n_priv_labels, args=args)
-    else:
-        val_ds = None
-    logging.debug("Datasets created.")
+    df = pd.read_json(data_dir.joinpath('data.json'), orient='records', lines=True)
+    if args.data_split:
+        df = df.sample(frac=1).reset_index(drop=True)[:args.data_split]
 
-    return train_ds, test_ds, val_ds, n_labels, n_priv_labels
+    return df
+
+
+def prepare_data(df, args):
+    """
+    Convert dataframe to inputs for Keras model
+    :param df: Pandas dataframe with input examples, labels, private information labels
+    :param args: program arguments
+    :return: x: dict containing token ids, attention mask ids, y: dict containing one-hot encoded labels, binary private variable labels
+    """
+    df = df.copy()
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
+                                              cache_dir=args.cache_dir,
+                                              do_lower_case=True)
+
+    encoded = tokenizer(df['text'].to_list(),
+                        truncation=True,
+                        padding='max_length',
+                        max_length=args.max_length,
+                        add_special_tokens=True,
+                        return_token_type_ids=False,
+                        return_tensors='tf')
+
+    df['rating'] = df['rating'].apply(lambda x: x - 1)
+    x = {name: encoded[name] for name in ['input_ids', 'attention_mask']}
+    y = {"base": to_categorical(df['rating'].to_numpy(), num_classes=None), "attacker": df['gender'].to_numpy()}
+
+    return x, y

@@ -153,5 +153,8 @@ fabric.properties
 cache/
 data/
 logs/
+tuning/
+dp_tuning/
 *summary.txt
 *.csv
+*.zip
