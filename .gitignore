@@ -158,3 +158,5 @@ dp_tuning/
 *summary.txt
 *.csv
 *.zip
+tuner.py
+tester.py

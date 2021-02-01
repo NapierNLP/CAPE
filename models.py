@@ -92,12 +92,10 @@ class ClassifierBuilder:
                       metrics={
                           "base": [
                               keras.metrics.CategoricalAccuracy(name='acc'),
-                              keras.metrics.MeanSquaredError(name='mse'),
                               tfa.metrics.F1Score(name='f1', average='weighted', num_classes=n_labels)
                           ],
                           "attacker": [
                               keras.metrics.BinaryAccuracy(name='acc'),
-                              keras.metrics.AUC(name='auc'),
                               tfa.metrics.F1Score(name='f1', num_classes=1, threshold=0.5)
                           ]
                       })
