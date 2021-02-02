@@ -96,7 +96,7 @@ class ClassifierBuilder:
                           ],
                           "attacker": [
                               keras.metrics.BinaryAccuracy(name='acc'),
-                              tfa.metrics.F1Score(name='f1', num_classes=1, threshold=0.5)
+                              tfa.metrics.F1Score(name='f1', average="micro", num_classes=2, threshold=0.5)
                           ]
                       })
 
