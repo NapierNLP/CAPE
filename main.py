@@ -8,6 +8,7 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from models import ClassifierBuilder
 from utils import get_task_data, prepare_data
 from numpy import zeros
+from datetime import date
 
 
 def test_model(model, args, test_ds, log_dir=None):
@@ -66,12 +67,7 @@ def run_model(model: tf.keras.Model,
         val_data = (prepare_data(val_ds, args))
 
     csv_back = tf.keras.callbacks.CSVLogger(filename=log_dir.joinpath('train.csv'), append=False)
-    tb_back = tf.keras.callbacks.TensorBoard(log_dir=log_dir,
-                                             update_freq='epoch',
-                                             histogram_freq=0,
-                                             profile_batch=0,
-                                             write_graph=False)
-    callbacks.extend([csv_back, tb_back])
+    callbacks.extend([csv_back])
 
     if not args.no_early_stopping:
         early_back = tf.keras.callbacks.EarlyStopping(monitor='val_base_loss' if args.validate else 'base_loss',
@@ -141,7 +137,7 @@ def main():
         "--hidden_size",
         default=256,
         type=int,
-        help="Number of hidden units to use in linear classifier. Defaults to 256.",
+        help="Number of hidden units to use in classifiers. Defaults to 256.",
     )
 
     parser.add_argument(
@@ -259,7 +255,7 @@ def main():
         physical_devices = tf.config.list_physical_devices('GPU')
         tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
-    ds = get_task_data(args)
+    ds, args.labels, l_labels, b_labels = get_task_data(args)
     skf = StratifiedKFold(n_splits=args.cv, random_state=42, shuffle=True)
 
     split = 1
@@ -267,22 +263,30 @@ def main():
         train_ds = ds.iloc[train_idx]
         test_ds = ds.iloc[test_idx]
 
-        model = ClassifierBuilder(args).get_classifier(ds.rating.nunique(),
-                                                       ds.gender.nunique(),
-                                                       "combined_classifier")
-        log_dir = pathlib.Path.cwd().joinpath(args.log_dir)
-        log_dir = log_dir.joinpath(f"{f'{args.tag}' if args.tag else ''}_{split}")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        history = run_model(model,
-                            args,
-                            train_ds=train_ds,
-                            log_dir=log_dir)
-        logging.debug(history.history)
-        result = test_model(model,
-                            args,
-                            test_ds=test_ds,
-                            log_dir=log_dir)
-        logging.debug(result)
+        for identifier in ['birth_year', 'loc', 'gender']:
+            args.identifier = identifier
+            if identifier == 'birth_year':
+                args.priv_labels = b_labels
+            elif identifier == 'loc':
+                args.priv_labels = l_labels
+            else:
+                args.priv_labels = ds.gender.unique()
+            model = ClassifierBuilder(args).get_classifier("combined_classifier")
+            log_dir = pathlib.Path.cwd().joinpath(args.log_dir).joinpath(str(date.today())).joinpath(identifier)
+            log_dir = log_dir.joinpath(f"{f'{args.tag}' if args.tag else ''}_{split}")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            logging.debug(f"Training model for {identifier} {f'{args.tag}' if args.tag else ''}_{split}...")
+            history = run_model(model,
+                                args,
+                                train_ds=train_ds,
+                                log_dir=log_dir)
+            #logging.debug(history.history)
+            logging.debug(f"Testing {identifier} {f'{args.tag}' if args.tag else ''}_{split}...")
+            result = test_model(model,
+                                args,
+                                test_ds=test_ds,
+                                log_dir=log_dir)
+            #logging.debug(result)
         split += 1
 
 

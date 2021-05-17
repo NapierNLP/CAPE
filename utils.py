@@ -8,6 +8,7 @@ import pandas as pd
 import logging
 from tensorflow.keras.utils import to_categorical
 from transformers import BertTokenizer
+import pygeohash as pgh
 
 
 def clean_file(file):
@@ -21,13 +22,16 @@ def clean_file(file):
         with open(file, encoding='utf-8', mode='r') as f:
             for line in f:
                 data = ast.literal_eval(line)
-                if 'gender' in data.keys() and data['gender']:
+                if {'gender', 'birth_year', 'geocodes'}.issubset(data.keys()) \
+                        and data['gender'] and data['birth_year'] and data['geocodes']:
                     for review in data['reviews']:
                         if review['rating'] and review['text']:
                             new_data = {
                                 'text': review['text'][0],
                                 'rating': int(review['rating']),
-                                'gender': data['gender']
+                                'gender': data['gender'],
+                                'birth_year': data['birth_year'],
+                                'loc': pgh.encode(data['geocodes'][0]['lat'], data['geocodes'][0]['lng'], precision=2),
                             }
                             clean_list.append(new_data)
     return clean_list
@@ -44,28 +48,35 @@ def get_task_data(args):
     data_dir = pathlib.Path.cwd().joinpath(args.cache_dir, 'data')
     data_dir.mkdir(exist_ok=True, parents=True)
 
-    if not data_dir.joinpath('data.json').is_file():
+    if not data_dir.joinpath('united_kingdom.auto-adjusted_gender.NUTS-regions.jsonl.tmp'):
         logging.debug("Downloading and extracting...")
         with urlopen(url) as zipresp:
             with ZipFile(BytesIO(zipresp.read())) as zfile:
                 zfile.extractall(str(data_dir))
         logging.debug("Downloaded.")
+
+    if not data_dir.joinpath('data.json').is_file():
         logging.debug("Cleaning and saving data...")
         for filename in os.listdir(data_dir):
             if filename.endswith('.jsonl.tmp'):
                 clean = clean_file(os.path.join(data_dir, filename))
                 df = pd.DataFrame(clean)
                 df['gender'] = df['gender'].astype('category').cat.codes.astype(int)
-                df['rating'] = df.rating.astype(int)
+                df['loc'] = df['loc'].astype('category').cat.codes.astype(int)
+                df['birth_year'] = pd.qcut(df['birth_year'], q=6, labels=False)
+                df['rating'] = df.rating.astype(int) - 1
                 with open(data_dir.joinpath("data.json"), encoding='utf-8', mode='w') as f:
                     df.to_json(f, orient='records', lines=True)
         logging.debug("Saved.")
 
     df = pd.read_json(data_dir.joinpath('data.json'), orient='records', lines=True)
+    labels = df.rating.unique()
+    loc_labels = df['loc'].unique()
+    b_labels = df.birth_year.unique()
     if args.data_split:
         df = df.sample(frac=1).reset_index(drop=True)[:args.data_split]
 
-    return df
+    return df, labels, loc_labels, b_labels
 
 
 def prepare_data(df, args):
@@ -78,6 +89,7 @@ def prepare_data(df, args):
     df = df.copy()
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased',
                                               cache_dir=args.cache_dir,
+                                              local_files_only=True,
                                               do_lower_case=True)
 
     encoded = tokenizer(df['text'].to_list(),
@@ -88,8 +100,11 @@ def prepare_data(df, args):
                         return_token_type_ids=False,
                         return_tensors='tf')
 
-    df['rating'] = df['rating'].apply(lambda x: x - 1)
     x = {name: encoded[name] for name in ['input_ids', 'attention_mask']}
-    y = {"base": to_categorical(df['rating'].to_numpy(), num_classes=None), "attacker": df['gender'].to_numpy()}
+    if args.identifier == 'gender':
+        atk_y = df['gender'].to_numpy()
+    else:
+        atk_y = to_categorical(df[args.identifier].to_numpy(), num_classes=len(args.priv_labels))
+    y = {"base": to_categorical(df.rating.to_numpy(), num_classes=len(args.labels)), "attacker": atk_y}
 
     return x, y

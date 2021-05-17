@@ -1,7 +1,7 @@
 from tensorflow import keras, constant
 from tensorflow.keras import layers
 from tensorflow import reduce_mean, reduce_min, reduce_max, reshape
-from transformers import TFBertModel, BertConfig
+from transformers import TFBertModel, BertConfig, logging
 from flipGradientTF import GradientReversal
 from tensorflow_probability import distributions as tfd
 import tensorflow_addons as tfa
@@ -26,21 +26,26 @@ class ClassifierBuilder:
         self.epsilon = args.epsilon
         self.balance = args.balance
         self.learning_rate = args.learning_rate
+        self.identifier = args.identifier
+        self.labels = args.labels
+        self.priv_labels = args.priv_labels
 
-    def get_classifier(self, n_labels: int, n_priv_labels: int, name: str):
+    def get_classifier(self, name: str):
         """
         Return an end-to-end classifier that takes a set of tokenized inputs and learns to predict labels.
-        :param n_labels: number of possible label values to predict
-        :param n_priv_labels: number of possible values of private information label
         :param name: name to attach to the model
         :return: keras.Model instance
         """
+        logging.set_verbosity_error()
         config = BertConfig(return_dict=True,
                             output_attentions=False,
                             output_hidden_states=False,
                             use_cache=False,
                             hidden_size=self.embed_length)
-        embed_model = TFBertModel.from_pretrained('bert-base-uncased', config=config, cache_dir=self.cache)
+        embed_model = TFBertModel.from_pretrained('bert-base-uncased',
+                                                  config=config,
+                                                  cache_dir=self.cache,
+                                                  local_files_only=True)
         for layer in embed_model.layers:
             layer.trainable = False
 
@@ -53,6 +58,7 @@ class ClassifierBuilder:
             embed_min = reduce_min(x, keepdims=True)
             embed_max = reduce_max(x, keepdims=True)
             x = (x - embed_min) / (embed_max - embed_min)
+            print(x)
             noise = tfd.Laplace(constant([0.0]), constant([1.0 / self.epsilon]))
             noise_s = noise.sample(sample_shape=self.embed_length)
             x += reshape(noise_s, shape=(-1))
@@ -67,7 +73,7 @@ class ClassifierBuilder:
         linear = layers.Dense(self.hidden, activation='relu')(features)
         if self.dropout:
             linear = layers.Dropout(self.dropout)(linear)
-        preds = layers.Dense(n_labels, activation='softmax', name="base")(linear)
+        preds = layers.Dense(len(self.labels), activation='softmax', name="base")(linear)
 
         # adversary classifier
         if self.adversarial:
@@ -79,25 +85,37 @@ class ClassifierBuilder:
                                     activation='relu')(features)
         if self.dropout:
             a_linear = layers.Dropout(self.dropout)(a_linear)
-        a_preds = layers.Dense(1, activation='sigmoid', name="attacker")(a_linear)
+        if self.identifier == 'gender':
+            a_preds = layers.Dense(1, activation='sigmoid', name="attacker")(a_linear)
+        else:
+            a_preds = layers.Dense(len(self.priv_labels), activation='softmax', name='attacker')(a_linear)
 
         model = keras.Model(inputs={"input_ids": input_ids, "attention_mask": attention_mask},
                             outputs={"base": preds, "attacker": a_preds},
                             name=name)
+        if self.identifier == 'gender':
+            a_loss = keras.losses.BinaryCrossentropy()
+            a_metrics = [
+                keras.metrics.BinaryAccuracy(name='acc'),
+                tfa.metrics.F1Score(name='f1', average="micro", num_classes=2, threshold=0.5)
+            ]
+        else:
+            a_loss = keras.losses.CategoricalCrossentropy()
+            a_metrics = [
+                keras.metrics.CategoricalAccuracy(name='acc'),
+                tfa.metrics.F1Score(name='f1', average='weighted', num_classes=len(self.priv_labels))
+            ]
         model.compile(optimizer=keras.optimizers.Adam(learning_rate=self.learning_rate),
                       loss={
                           "base": keras.losses.CategoricalCrossentropy(),
-                          "attacker": keras.losses.BinaryCrossentropy()
+                          "attacker": a_loss
                       },
                       metrics={
                           "base": [
                               keras.metrics.CategoricalAccuracy(name='acc'),
-                              tfa.metrics.F1Score(name='f1', average='weighted', num_classes=n_labels)
+                              tfa.metrics.F1Score(name='f1', average='weighted', num_classes=len(self.labels))
                           ],
-                          "attacker": [
-                              keras.metrics.BinaryAccuracy(name='acc'),
-                              tfa.metrics.F1Score(name='f1', average="micro", num_classes=2, threshold=0.5)
-                          ]
+                          "attacker": a_metrics
                       })
 
         return model
