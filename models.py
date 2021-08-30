@@ -58,7 +58,7 @@ class ClassifierBuilder:
             embed_min = reduce_min(x, keepdims=True)
             embed_max = reduce_max(x, keepdims=True)
             x = (x - embed_min) / (embed_max - embed_min)
-            print(x)
+            # print(x)
             noise = tfd.Laplace(constant([0.0]), constant([1.0 / self.epsilon]))
             noise_s = noise.sample(sample_shape=self.embed_length)
             x += reshape(noise_s, shape=(-1))

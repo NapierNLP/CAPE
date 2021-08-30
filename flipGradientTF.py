@@ -38,7 +38,7 @@ class GradientReversal(Layer):
 
         return y, custom_grad
 
-    def call(self, x, mask=None):
+    def call(self, x, mask=None, **kwargs):
         return self.grad_reverse(x)
 
     def get_output_shape_for(self, input_shape):

@@ -264,29 +264,30 @@ def main():
         test_ds = ds.iloc[test_idx]
 
         for identifier in ['birth_year', 'loc', 'gender']:
-            args.identifier = identifier
-            if identifier == 'birth_year':
-                args.priv_labels = b_labels
-            elif identifier == 'loc':
-                args.priv_labels = l_labels
-            else:
-                args.priv_labels = ds.gender.unique()
-            model = ClassifierBuilder(args).get_classifier("combined_classifier")
-            log_dir = pathlib.Path.cwd().joinpath(args.log_dir).joinpath(str(date.today())).joinpath(identifier)
-            log_dir = log_dir.joinpath(f"{f'{args.tag}' if args.tag else ''}_{split}")
-            log_dir.mkdir(parents=True, exist_ok=True)
-            logging.debug(f"Training model for {identifier} {f'{args.tag}' if args.tag else ''}_{split}...")
-            history = run_model(model,
-                                args,
-                                train_ds=train_ds,
-                                log_dir=log_dir)
-            #logging.debug(history.history)
-            logging.debug(f"Testing {identifier} {f'{args.tag}' if args.tag else ''}_{split}...")
-            result = test_model(model,
-                                args,
-                                test_ds=test_ds,
-                                log_dir=log_dir)
-            #logging.debug(result)
+            if split > 3:
+                args.identifier = identifier
+                if identifier == 'birth_year':
+                    args.priv_labels = b_labels
+                elif identifier == 'loc':
+                    args.priv_labels = l_labels
+                else:
+                    args.priv_labels = ds.gender.unique()
+                model = ClassifierBuilder(args).get_classifier("combined_classifier")
+                log_dir = pathlib.Path.cwd().joinpath(args.log_dir).joinpath(str(date.today())).joinpath(identifier)
+                log_dir = log_dir.joinpath(f"{f'{args.tag}' if args.tag else ''}_{split}")
+                log_dir.mkdir(parents=True, exist_ok=True)
+                logging.debug(f"Training model for {identifier} {f'{args.tag}' if args.tag else ''}_{split}...")
+                history = run_model(model,
+                                    args,
+                                    train_ds=train_ds,
+                                    log_dir=log_dir)
+                #logging.debug(history.history)
+                logging.debug(f"Testing {identifier} {f'{args.tag}' if args.tag else ''}_{split}...")
+                result = test_model(model,
+                                    args,
+                                    test_ds=test_ds,
+                                    log_dir=log_dir)
+                #logging.debug(result)
         split += 1
 
 
